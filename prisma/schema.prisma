@@ -1,0 +1,766 @@
+// ============================================================================
+// SONIC PACKAGING — DATABASE SCHEMA
+// ============================================================================
+// This file is the single source of truth for the entire database.
+// Read it top to bottom like a table of contents for the whole platform:
+// every admin module and every public page is backed by a model below.
+//
+// Naming convention: models are PascalCase (how you use them in TypeScript,
+// e.g. `prisma.contactSubmission`), but every table/column is explicitly
+// mapped (@@map / @map) to snake_case in the actual Postgres database
+// (e.g. `contact_submissions`) — clean on both sides.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================================
+// 1. AUTH & ROLE-BASED ACCESS CONTROL (RBAC)
+// ============================================================================
+// Every admin user has exactly one Role. Roles are stored in the database
+// (not hard-coded) so Super Admins can see/manage them, but the 8 roles
+// required by the brief are seeded in and identified by a stable `key`
+// so route guards can check access instantly from a signed session
+// cookie without a database round-trip.
+
+enum RoleKey {
+  SUPER_ADMIN // Everything.
+  WEBSITE_ADMIN // Website content and site settings.
+  MARKETING_COMMS // Content, media, insights, testimonials.
+  HR // Jobs and applications.
+  SALES // Enquiries and RFQs.
+  OPERATIONS // Factory dashboard.
+  LEADERSHIP // Dashboard / read access.
+  ANALYST // Analytics / reporting.
+
+  @@map("role_key")
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  key         RoleKey          @unique
+  name        String
+  description String?
+  users       User[]
+  permissions RolePermission[]
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  @@map("roles")
+}
+
+// Fine-grained, admin-configurable permission grants layered on top of the
+// role key. Route guards check the fast `RoleKey` first; screens that need
+// finer control (e.g. "can publish" vs "can only draft") check these.
+model Permission {
+  id          String           @id @default(cuid())
+  key         String           @unique // e.g. "content.publish", "leads.manage"
+  module      String // e.g. "Website Content", "Requests & Leads"
+  description String?
+  roles       RolePermission[]
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  roleId       String    @map("role_id")
+  role         Role      @relation(fields: [roleId], references: [id])
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  // Reverse relations — everything this person has authored/actioned in the CMS.
+  contentVersions       ContentVersion[]    @relation("ContentVersionEditor")
+  mediaUploads          Media[]             @relation("MediaUploader")
+  articles               Article[]          @relation("ArticleAuthor")
+  assignedContacts       ContactSubmission[] @relation("ContactAssignee")
+  assignedQuotes          QuoteRequest[]     @relation("QuoteAssignee")
+  reviewedApplications   Application[]       @relation("ApplicationReviewer")
+  auditLogs               AuditLog[]
+  updatedSiteSettings     SiteSetting[]
+
+  @@index([roleId])
+  @@map("users")
+}
+
+// ============================================================================
+// 2. CMS CORE — pages, sections, and versioned content
+// ============================================================================
+// A Page (e.g. "home", "about") is a fixed shell of named Sections
+// (e.g. "hero", "stats", "cta"). Each Section holds many ContentVersions
+// over time — editing never touches the live version; publishing simply
+// repoints the section at a new version. This is what makes "do not
+// overwrite published content while an editor drafts" true by construction.
+
+enum ContentStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+
+  @@map("content_status")
+}
+
+model Page {
+  id        String        @id @default(cuid())
+  slug      String        @unique // "home" | "about" | "capabilities" | ...
+  title     String
+  sections  PageSection[]
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+
+  @@map("pages")
+}
+
+model PageSection {
+  id     String @id @default(cuid())
+  pageId String @map("page_id")
+  page   Page   @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  key   String // template slot, e.g. "hero", "intro", "stats", "cta"
+  order Int    @default(0)
+
+  // The version currently live on the public site (nullable until first publish).
+  publishedVersionId String?         @unique @map("published_version_id")
+  publishedVersion    ContentVersion? @relation("PublishedVersion", fields: [publishedVersionId], references: [id])
+
+  versions  ContentVersion[] @relation("SectionVersions")
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  @@unique([pageId, key])
+  @@map("page_sections")
+}
+
+model ContentVersion {
+  id        String        @id @default(cuid())
+  sectionId String        @map("section_id")
+  section   PageSection   @relation("SectionVersions", fields: [sectionId], references: [id], onDelete: Cascade)
+  status    ContentStatus @default(DRAFT)
+
+  // Structured field values for this section's template — heading, body,
+  // CTA label/href, image references, stat values, etc. Shape depends on
+  // the section's `key` and is validated with a zod schema per template.
+  data Json
+
+  // True when `data` contains the [CEO CONFIRMATION REQUIRED] placeholder
+  // anywhere — computed on every save so the admin dashboard can list
+  // everything still awaiting real content without scanning the DB live.
+  needsConfirmation Boolean @default(false) @map("needs_confirmation")
+
+  editorId String @map("editor_id")
+  editor   User   @relation("ContentVersionEditor", fields: [editorId], references: [id])
+
+  publishedAsSection PageSection? @relation("PublishedVersion")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([sectionId, status])
+  @@index([needsConfirmation])
+  @@map("content_versions")
+}
+
+// ============================================================================
+// 3. MEDIA LIBRARY
+// ============================================================================
+
+enum MediaType {
+  IMAGE
+  VIDEO
+  PDF
+  DOCUMENT
+
+  @@map("media_type")
+}
+
+model Media {
+  id         String    @id @default(cuid())
+  title      String
+  altText    String?   @map("alt_text")
+  caption    String?
+  fileType   MediaType @map("file_type")
+  mimeType   String    @map("mime_type")
+  fileSize   Int       @map("file_size") // bytes
+  url        String
+  storageKey String    @map("storage_key") // key/path inside the object storage bucket
+  width      Int?
+  height     Int?
+  usageNotes String?   @map("usage_notes")
+
+  // Nullable: not every file in this table is admin-curated editorial
+  // content. A Contact/RFQ attachment is uploaded by an anonymous site
+  // visitor, not a logged-in admin, so it has no uploader. isLeadAttachment
+  // marks those so the admin Media Library (hero images, product photos,
+  // article art — content an editor deliberately curated) can exclude them
+  // by default, while the Leads/RFQ admin views still join to this same
+  // table to preview or download what a customer attached.
+  uploadedById String?  @map("uploaded_by_id")
+  uploadedBy   User?    @relation("MediaUploader", fields: [uploadedById], references: [id])
+  uploadedAt   DateTime @default(now()) @map("uploaded_at")
+  isLeadAttachment Boolean @default(false) @map("is_lead_attachment")
+
+  productImages ProductImage[]
+
+  @@index([fileType])
+  @@map("media")
+}
+
+// ============================================================================
+// 4. CAPABILITIES & PRODUCTS
+// ============================================================================
+// `status` is the database-controlled field behind the CEO's non-negotiable
+// framing: Sonic Plastics' existing rigid-plastics packaging is CURRENT;
+// PET bottles/caps and food packaging sit here IN_DEVELOPMENT; Sonic
+// Cartons (corrugated/paper) is FUTURE. Editable only through the CMS.
+
+enum CapabilityStatus {
+  CURRENT
+  IN_DEVELOPMENT
+  FUTURE
+
+  @@map("capability_status")
+}
+
+model Capability {
+  id          String            @id @default(cuid())
+  slug        String            @unique
+  name        String
+  summary     String
+  description String?
+  status      CapabilityStatus  @default(CURRENT)
+  iconMediaId String?           @map("icon_media_id")
+  isPublished Boolean           @default(false) @map("is_published")
+  order       Int               @default(0)
+  products    Product[]
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  @@map("capabilities")
+}
+
+model Product {
+  id           String     @id @default(cuid())
+  capabilityId String     @map("capability_id")
+  capability   Capability @relation(fields: [capabilityId], references: [id], onDelete: Cascade)
+  name         String
+  slug         String     @unique
+
+  // "division"/"category" are free-text descriptive labels only (e.g.
+  // "Plastics", "PET") — never rendered as a logo or sub-brand mark, per
+  // the brand guidelines' category-label rule.
+  division    String?
+  category    String?
+  summary     String // short_description
+  description String?
+  material    String?
+  sizes       String?
+  colours     String?
+
+  specifications   String?
+  status           CapabilityStatus @default(CURRENT)
+  featured         Boolean          @default(false)
+  images           ProductImage[]
+  specSheetMediaId String?          @map("spec_sheet_media_id") // datasheet
+
+  seoTitle       String? @map("seo_title")
+  seoDescription String? @map("seo_description")
+
+  isPublished Boolean  @default(false) @map("is_published")
+  order       Int      @default(0)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([capabilityId])
+  @@map("products")
+}
+
+// Ordered gallery join — a Product can show several images; a Media item
+// (e.g. a facility photo reused as a texture shot) can appear on several
+// products. Kept separate from Product.specSheetMediaId (the datasheet).
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  mediaId   String  @map("media_id")
+  media     Media   @relation(fields: [mediaId], references: [id])
+  order     Int     @default(0)
+
+  @@unique([productId, mediaId])
+  @@map("product_images")
+}
+
+// ============================================================================
+// 5. FACILITIES
+// ============================================================================
+
+model Facility {
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  location       String // short "City, State" label, used on cards/lists
+  address        String? // full postal block (multi-line), shown on the Contact page
+  phone          String?
+  email          String?
+  description    String?
+  coverMediaId   String?  @map("cover_media_id")
+  isHeadquarters Boolean  @default(false) @map("is_headquarters")
+  isPublished    Boolean  @default(false) @map("is_published")
+  order          Int      @default(0)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("facilities")
+}
+
+// ============================================================================
+// 6. LEADERSHIP & ORGANISATION CHART
+// ============================================================================
+
+model Executive {
+  id            String             @id @default(cuid())
+  name          String
+  title         String
+  bio           String?
+  photoMediaId  String?            @map("photo_media_id")
+  isPublished   Boolean            @default(false) @map("is_published")
+  order         Int                @default(0)
+  orgNodes      OrganisationNode[]
+  createdAt     DateTime           @default(now()) @map("created_at")
+  updatedAt     DateTime           @updatedAt @map("updated_at")
+
+  @@map("executives")
+}
+
+model OrganisationNode {
+  id          String             @id @default(cuid())
+  label       String // box title, e.g. "Chief Executive Officer"
+  executiveId String?            @map("executive_id")
+  executive   Executive?         @relation(fields: [executiveId], references: [id])
+  parentId    String?            @map("parent_id")
+  parent      OrganisationNode?  @relation("OrgHierarchy", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children    OrganisationNode[] @relation("OrgHierarchy")
+  order       Int                @default(0)
+  isPublished Boolean            @default(false) @map("is_published")
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  @@index([parentId])
+  @@map("organisation_nodes")
+}
+
+// ============================================================================
+// 7. TESTIMONIALS
+// ============================================================================
+// isPublished defaults false by design — testimonials are on the brief's
+// "never invent" list, so nothing here reaches the public site until a
+// real quote is entered and deliberately published.
+
+model Testimonial {
+  id              String   @id @default(cuid())
+  quote           String
+  customerName    String   @map("customer_name")
+  customerTitle   String?  @map("customer_title")
+  customerCompany String?  @map("customer_company")
+  logoMediaId     String?  @map("logo_media_id")
+  isPublished     Boolean  @default(false) @map("is_published")
+  order           Int      @default(0)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("testimonials")
+}
+
+// ============================================================================
+// 8. INSIGHTS (ARTICLES)
+// ============================================================================
+
+model ArticleCategory {
+  id       String    @id @default(cuid())
+  name     String
+  slug     String    @unique
+  articles Article[]
+
+  @@map("article_categories")
+}
+
+enum ArticleStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  ARCHIVED
+
+  @@map("article_status")
+}
+
+model Article {
+  id           String           @id @default(cuid())
+  slug         String           @unique
+  title        String
+  excerpt      String?
+  body         String // markdown
+  coverMediaId String?          @map("cover_media_id")
+  // Separate from coverMediaId (hero image on the article itself) since a
+  // social share card is often a different crop/composition — brief
+  // section 20 lists them as two distinct fields.
+  ogMediaId    String?          @map("og_media_id")
+  categoryId   String?          @map("category_id")
+  category     ArticleCategory? @relation(fields: [categoryId], references: [id])
+  authorId     String           @map("author_id")
+  author       User             @relation("ArticleAuthor", fields: [authorId], references: [id])
+  // Public-facing byline label (e.g. "Plant Manager", "Marketing Team") —
+  // distinct from the linked User's internal admin RoleKey.
+  authorRole   String?          @map("author_role")
+  featured     Boolean          @default(false)
+  seoTitle     String?          @map("seo_title")
+  seoDescription String?        @map("seo_description")
+  status       ArticleStatus    @default(DRAFT)
+  publishedAt  DateTime?        @map("published_at")
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  @@index([status, publishedAt])
+  @@index([categoryId])
+  @@map("articles")
+}
+
+// ============================================================================
+// 9. CAREERS — jobs & applications
+// ============================================================================
+
+enum JobStatus {
+  DRAFT
+  OPEN
+  CLOSED
+
+  @@map("job_status")
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  INTERNSHIP
+
+  @@map("employment_type")
+}
+
+model Job {
+  id             String         @id @default(cuid())
+  slug           String         @unique
+  title          String
+  department     String?
+  location       String?
+  employmentType EmploymentType @default(FULL_TIME) @map("employment_type")
+  summary        String?
+  description    String
+  requirements   String?
+  status         JobStatus      @default(DRAFT)
+  postedAt       DateTime?      @map("posted_at")
+  closesAt       DateTime?      @map("closes_at")
+  applications   Application[]
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("jobs")
+}
+
+// Matches the brief's Application workflow exactly (section 26).
+enum ApplicationStatus {
+  NEW
+  REVIEWING
+  SHORTLISTED
+  INTERVIEW
+  OFFER
+  HIRED
+  REJECTED
+
+  @@map("application_status")
+}
+
+model Application {
+  id            String            @id @default(cuid())
+  // Nullable: the Careers page always accepts a CV even with zero open
+  // positions ("we're always interested in exceptional people" — brief
+  // section 21), so an application isn't necessarily tied to one requisition.
+  jobId         String?           @map("job_id")
+  job           Job?              @relation(fields: [jobId], references: [id])
+  fullName      String            @map("full_name")
+  email         String
+  phone         String?
+  coverNote     String?           @map("cover_note")
+  resumeMediaId String?           @map("resume_media_id")
+  status        ApplicationStatus @default(NEW)
+  reviewerId    String?           @map("reviewer_id")
+  reviewer      User?             @relation("ApplicationReviewer", fields: [reviewerId], references: [id])
+  internalNotes String?           @map("internal_notes")
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+
+  @@index([jobId, status])
+  @@map("applications")
+}
+
+// ============================================================================
+// 10. REQUESTS & LEADS — contact submissions and quote requests
+// ============================================================================
+// `sequence` is a DB-assigned autoincrement used only to mint the
+// human-facing reference (ENQ-000001 / RFQ-000001) atomically — the
+// public-facing primary key stays the opaque cuid `id`.
+
+// Matches the Contact form's dropdown exactly (brief section 22) — every
+// option there needs a value here so submissions aren't forced into
+// "OTHER" or a nearby-but-wrong category.
+enum EnquiryType {
+  REQUEST_QUOTE // "Request a Quote"
+  EXISTING_CUSTOMER // "Existing Customer"
+  SUPPLIER // "Supplier/Vendor"
+  PARTNERSHIP // "Partnership"
+  MEDIA // "Media/Press"
+  CAREERS // "Careers"
+  GENERAL // "General Enquiry"
+  OTHER
+
+  @@map("enquiry_type")
+}
+
+enum ContactStatus {
+  NEW
+  IN_REVIEW
+  ASSIGNED
+  RESPONDED
+  CLOSED
+
+  @@map("contact_status")
+}
+
+enum SyncStatus {
+  NOT_SYNCED
+  PENDING
+  SYNCED
+  SYNC_FAILED
+
+  @@map("sync_status")
+}
+
+model ContactSubmission {
+  id                String        @id @default(cuid())
+  sequence          Int           @default(autoincrement())
+  reference         String        @unique // ENQ-000001
+  name              String
+  company           String?
+  email             String
+  phone             String?
+  type              EnquiryType   @default(GENERAL)
+  subject           String
+  message           String
+  attachmentMediaId String?       @map("attachment_media_id")
+  status            ContactStatus @default(NEW)
+  assignedToId      String?       @map("assigned_to_id")
+  assignedTo        User?         @relation("ContactAssignee", fields: [assignedToId], references: [id])
+  internalNotes     String?       @map("internal_notes")
+  zohoStatus        SyncStatus    @default(NOT_SYNCED) @map("zoho_status")
+  zohoRecordId      String?       @map("zoho_record_id")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([zohoStatus])
+  @@map("contact_submissions")
+}
+
+enum QuoteStatus {
+  NEW
+  QUALIFYING
+  ASSIGNED
+  QUOTING
+  QUOTE_SENT
+  WON
+  LOST
+
+  @@map("quote_status")
+}
+
+model QuoteRequest {
+  id                 String      @id @default(cuid())
+  sequence           Int         @default(autoincrement())
+  reference          String      @unique // RFQ-000001
+  company            String
+  contactName        String      @map("contact_name")
+  email              String
+  phone              String?
+  packagingCategory  String      @map("packaging_category")
+  product            String?
+  quantity           String?
+  requiredDate       DateTime?   @map("required_date")
+  specifications     String?
+  attachmentMediaId  String?     @map("attachment_media_id")
+  status             QuoteStatus @default(NEW)
+  assignedToId       String?     @map("assigned_to_id")
+  assignedTo         User?       @relation("QuoteAssignee", fields: [assignedToId], references: [id])
+  internalNotes      String?     @map("internal_notes")
+  zohoStatus         SyncStatus  @default(NOT_SYNCED) @map("zoho_status")
+  zohoCrmId          String?     @map("zoho_crm_id")
+  createdAt          DateTime    @default(now()) @map("created_at")
+  updatedAt          DateTime    @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([zohoStatus])
+  @@map("quote_requests")
+}
+
+enum CrmSyncTarget {
+  CONTACT_SUBMISSION
+  QUOTE_REQUEST
+
+  @@map("crm_sync_target")
+}
+
+enum CrmSyncResult {
+  SUCCESS
+  FAILURE
+
+  @@map("crm_sync_result")
+}
+
+// Every Zoho sync attempt (automatic on submit, or a manual admin retry)
+// leaves a row here — this is what "record result" and "allow admin retry"
+// are built on.
+model CrmSyncLog {
+  id              String        @id @default(cuid())
+  targetType      CrmSyncTarget @map("target_type")
+  targetId        String        @map("target_id")
+  attemptedAt     DateTime      @default(now()) @map("attempted_at")
+  result          CrmSyncResult
+  errorMessage    String?       @map("error_message")
+  responsePayload Json?         @map("response_payload")
+
+  @@index([targetType, targetId])
+  @@map("crm_sync_logs")
+}
+
+// ============================================================================
+// 11. CERTIFICATIONS, ESG & CSR
+// ============================================================================
+
+model Certification {
+  id          String    @id @default(cuid())
+  name        String
+  issuer      String?
+  description String?
+  logoMediaId String?   @map("logo_media_id")
+  validFrom   DateTime? @map("valid_from")
+  validTo     DateTime? @map("valid_to")
+  isPublished Boolean   @default(false) @map("is_published")
+  order       Int       @default(0)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@map("certifications")
+}
+
+model EsgMetric {
+  id          String   @id @default(cuid())
+  category    String // "Environmental" | "Social" | "Governance"
+  label       String
+  value       String?
+  unit        String?
+  year        Int?
+  isPublished Boolean  @default(false) @map("is_published")
+  order       Int      @default(0)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("esg_metrics")
+}
+
+model CsrProgramme {
+  id           String   @id @default(cuid())
+  title        String
+  summary      String?
+  description  String?
+  coverMediaId String?  @map("cover_media_id")
+  isPublished  Boolean  @default(false) @map("is_published")
+  order        Int      @default(0)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("csr_programmes")
+}
+
+// ============================================================================
+// 12. SITE SETTINGS
+// ============================================================================
+// Simple key/value store for global switches — most importantly
+// PRODUCTION_MODE, which decides whether [CEO CONFIRMATION REQUIRED]
+// placeholders render (internal review) or are gracefully hidden
+// (real visitors). Defaults safe: OFF until deliberately switched on.
+
+model SiteSetting {
+  id           String   @id @default(cuid())
+  key          String   @unique
+  value        Json
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  updatedById  String?  @map("updated_by_id")
+  updatedBy    User?    @relation(fields: [updatedById], references: [id])
+
+  @@map("site_settings")
+}
+
+// ============================================================================
+// 13. AUDIT LOG
+// ============================================================================
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  PUBLISH
+  ARCHIVE
+  LOGIN
+  LOGIN_FAILED
+  STATUS_CHANGE
+  RETRY_SYNC
+
+  @@map("audit_action")
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  userId     String?     @map("user_id")
+  user       User?       @relation(fields: [userId], references: [id])
+  action     AuditAction
+  module     String // e.g. "Website Content", "Careers", "Users & Permissions"
+  recordType String?     @map("record_type") // e.g. "Article", "Job"
+  recordId   String?     @map("record_id")
+  before     Json?
+  after      Json?
+  ipAddress  String?     @map("ip_address")
+  createdAt  DateTime    @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([module, createdAt])
+  @@map("audit_logs")
+}

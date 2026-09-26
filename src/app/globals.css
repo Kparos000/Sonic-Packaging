@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+/* ============================================================================
+   SONIC PACKAGING — BRAND TOKENS
+   ============================================================================
+   These five colors are the ENTIRE palette (Brand Guidelines v2.0). Do not
+   add new colors here without checking the brand guide — this is deliberate,
+   not a starter-template placeholder list.
+
+   Tailwind v4 turns every `--color-*` variable below into a matching utility
+   automatically: --color-sonic-green  ->  bg-sonic-green / text-sonic-green /
+   border-sonic-green, etc. There is no tailwind.config.js in this project —
+   this file IS the config.
+   ============================================================================ */
+:root {
+  --color-sonic-green: #004d36; /* Sonic Forest Green — primary */
+  --color-sonic-gold: #d4a44e; /* Sonic Gold — accent, never as body text on light backgrounds */
+  --color-sonic-ivory: #f4f1e8; /* Sonic Ivory — primary light surface */
+  --color-sonic-charcoal: #202321; /* Sonic Charcoal — primary dark surface / body text */
+  --color-sonic-white: #ffffff;
+
+  /* Restrained, industrial corner radius — intentionally small. This is a
+     manufacturer's site, not a SaaS product; avoid the generic rounded-4xl
+     "friendly startup" look. */
+  --radius-sm: 0.125rem;
+  --radius-md: 0.25rem;
+  --radius-lg: 0.5rem;
+
+  --background: var(--color-sonic-white);
+  --foreground: var(--color-sonic-charcoal);
+}
+
+@theme inline {
+  --color-sonic-green: var(--color-sonic-green);
+  --color-sonic-gold: var(--color-sonic-gold);
+  --color-sonic-ivory: var(--color-sonic-ivory);
+  --color-sonic-charcoal: var(--color-sonic-charcoal);
+  --color-sonic-white: var(--color-sonic-white);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+
+  /* Wired to next/font in src/app/layout.tsx via the --font-manrope CSS
+     variable. Manrope only — no font substitution (Brand Guidelines v2.0). */
+  --font-sans: var(--font-manrope);
+}
+
+/* This is a brand-controlled site with a fixed light identity — Charcoal is
+   used deliberately as a section surface (footer, feature bands), not as an
+   OS-driven dark-mode alternate theme. No prefers-color-scheme override. */
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Accessibility: a single consistent focus ring across every interactive
+   element, in Sonic Green — visible on both Ivory/White and Charcoal
+   surfaces without relying on Gold (which fails contrast on light
+   backgrounds per the brand guide's own rule). */
+:focus-visible {
+  outline: 2px solid var(--color-sonic-green);
+  outline-offset: 2px;
+}

@@ -2,13 +2,13 @@
   "name": "sonic-packaging-web",
   "version": "0.1.0",
   "private": true,
-"scripts": {
-  "dev": "next dev",
-  "build": "prisma db push --accept-data-loss --skip-generate && prisma db seed && next build",
-  "start": "next start",
-  "lint": "eslint",
-  "postinstall": "prisma generate"
-}
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma db push --accept-data-loss --skip-generate && prisma db seed && next build",
+    "start": "next start",
+    "lint": "eslint",
+    "postinstall": "prisma generate"
+  },
   "dependencies": {
     "@hookform/resolvers": "^5.9.1",
     "@prisma/adapter-pg": "^7.10.0",

@@ -1,7 +1,7 @@
 import "server-only";
 import { put } from "@vercel/blob";
 import { prisma } from "@/lib/prisma";
-import type { MediaType } from "@/generated/prisma";
+import type { MediaType } from "@/generated/prisma/client";
 
 // Files accepted from public lead-capture forms (Contact's "Optional
 // Attachment", Request a Quote's "Upload Drawing / Specification /

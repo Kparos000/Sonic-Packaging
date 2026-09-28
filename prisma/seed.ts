@@ -5,7 +5,7 @@
 // (wired up in prisma.config.ts -> migrations.seed).
 import "dotenv/config";
 import bcrypt from "bcryptjs";
-import { PrismaClient, type Prisma } from "../src/generated/prisma";
+import { PrismaClient, type Prisma } from "../src/generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { ROLE_KEYS, ROLE_LABELS, ROLE_DESCRIPTIONS } from "../src/lib/roles";
 import { SITE_SETTINGS } from "../src/lib/constants";

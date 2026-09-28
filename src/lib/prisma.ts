@@ -1,5 +1,5 @@
 import "server-only";
-import { PrismaClient } from "@/generated/prisma";
+import { PrismaClient } from "@/generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 
 // Prisma 7 has no Rust query engine — every database needs a driver
